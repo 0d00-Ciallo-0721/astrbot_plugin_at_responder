@@ -1,32 +1,42 @@
 {
-  "global_at_list": {
-      "description": "全局@列表，在所有群聊中都@的用户ID列表",
-      "type": "list",
-      "hint": "请输入QQ号，一行一个",
-      "items": {
-          "type": "string"
-      },
-      "default": []
-  },
-  "specific_at_json": {
-      "description": "特定群@配置（JSON格式）",
-      "type": "string",
-      "hint": "格式为JSON: {\"群ID1\":[\"用户ID1\",\"用户ID2\"], \"群ID2\":[\"用户ID3\"]}",
-      "default": "{}"
-  },
-  "all_at_groups": {
-      "description": "全群@列表，在这些群聊中@所有用户",
-      "type": "list",
-      "hint": "请输入群ID，一行一个",
-      "items": {
-          "type": "string"
-      },
-      "default": []
-  },
-  "blacklist_json": {
-      "description": "黑名单配置（JSON格式）",
-      "type": "string",
-      "hint": "格式为JSON: {\"全局\":[\"用户ID1\",\"用户ID2\"], \"群ID1\":[\"用户ID3\"]}",
-      "default": "{\"全局\":[]}"
+    "global_at_list": {
+        "description": "全局@列表，在所有群聊中都@的用户ID列表",
+        "type": "list",
+        "hint": "请输入QQ号，一行一个",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "specific_at_json": {
+        "description": "特定群@配置（JSON格式）",
+        "type": "string",
+        "hint": "格式为JSON: {\"群ID1\":[\"用户ID1\",\"用户ID2\"], \"群ID2\":[\"用户ID3\"]}",
+        "default": "{}"
+    },
+    "all_at_groups": {
+        "description": "全群@列表，在这些群聊中@所有用户",
+        "type": "list",
+        "hint": "请输入群ID，一行一个",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "blacklist_json": {
+        "description": "黑名单配置（JSON格式）",
+        "type": "string",
+        "hint": "格式为JSON: {\"全局\":[\"用户ID1\",\"用户ID2\"], \"群ID1\":[\"用户ID3\"]}",
+        "default": "{\"全局\":[]}"
+    },
+    "keyword_blacklist": {
+        "description": "关键词黑名单，消息中含有这些关键词时不会被@",
+        "type": "list",
+        "hint": "请输入关键词，一行一个",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    }
   }
-}
+  
