@@ -14,7 +14,7 @@ from functools import lru_cache
     "astrbot_plugin_at_responder",
     "和泉智宏",
     "针对特定用户的@回复功能，支持全局@、特定群@、全群@和黑名单设置",
-    "2.1",
+    "1.2",
     "https://github.com/0d00-Ciallo-0721/astrbot_plugin_at_responder"
 )
 class AtReplyPlugin(Star):
@@ -29,6 +29,7 @@ class AtReplyPlugin(Star):
         self._all_at_groups_set = None
         self._specific_at_dict = None
         self._blacklist_dict = None
+        self._keyword_blacklist_set = None
         
         # 创建定时重载任务
         self._create_reload_task()
@@ -51,6 +52,9 @@ class AtReplyPlugin(Star):
         # 使用defaultdict简化配置访问
         self._global_at_set = set(str(x) for x in self.config.get("global_at_list", []))
         self._all_at_groups_set = set(str(x) for x in self.config.get("all_at_groups", []))
+        
+        # 加载关键词黑名单
+        self._keyword_blacklist_set = set(str(x).lower() for x in self.config.get("keyword_blacklist", []))
         
         # 处理特定群@字典
         self._specific_at_dict = defaultdict(set)
@@ -81,7 +85,7 @@ class AtReplyPlugin(Star):
                 logger.error(f"处理 blacklist_json 时发生错误: {e}")
         
         # 验证配置中只有预期的键
-        valid_keys = {"global_at_list", "specific_at_json", "all_at_groups", "blacklist_json"}
+        valid_keys = {"global_at_list", "specific_at_json", "all_at_groups", "blacklist_json", "keyword_blacklist"}
         for key in list(self.config.keys()):
             if key not in valid_keys:
                 del self.config[key]
@@ -93,7 +97,8 @@ class AtReplyPlugin(Star):
             self._config_changed = False
             
         logger.debug(f"配置加载完成 - 全局@: {len(self._global_at_set)}人, "
-                    f"全群@: {len(self._all_at_groups_set)}群")
+                    f"全群@: {len(self._all_at_groups_set)}群, "
+                    f"关键词黑名单: {len(self._keyword_blacklist_set)}个")
     
     def _save_config(self):
         """仅在配置有变更时保存"""
@@ -101,6 +106,7 @@ class AtReplyPlugin(Star):
             # 将**转为列表保存
             self.config["global_at_list"] = list(self._global_at_set)
             self.config["all_at_groups"] = list(self._all_at_groups_set)
+            self.config["keyword_blacklist"] = list(self._keyword_blacklist_set)
             
             # 处理字典数据
             specific_dict = {k: list(v) for k, v in self._specific_at_dict.items() if v}
@@ -141,6 +147,19 @@ class AtReplyPlugin(Star):
         return (sender_id in self._blacklist_dict["全局"] or 
                 (group_id and sender_id in self._blacklist_dict[group_id]))
     
+    def _has_blacklisted_keyword(self, message_text: str) -> bool:
+        """检查消息是否包含黑名单关键词"""
+        self._ensure_configs_loaded()
+        if not self._keyword_blacklist_set or not message_text:
+            return False
+            
+        message_text = message_text.lower()
+        for keyword in self._keyword_blacklist_set:
+            if keyword in message_text:
+                logger.debug(f"消息中包含黑名单关键词: {keyword}")
+                return True
+        return False
+    
     @lru_cache(maxsize=128)
     def _need_at(self, sender_id: str, group_id: Optional[str]) -> bool:
         """检查是否需要@该用户（使用缓存）"""
@@ -162,8 +181,13 @@ class AtReplyPlugin(Star):
             sender_id = str(event.get_sender_id())
             group_id = str(event.get_group_id()) if event.get_group_id() else None
             
-            # 使用缓存的检查方法
+            # 用户黑名单检查
             if self._is_blacklisted(sender_id, group_id):
+                return
+            
+            # 关键词黑名单检查
+            original_message = event.get_message()
+            if original_message and self._has_blacklisted_keyword(original_message):
                 return
                 
             if self._need_at(sender_id, group_id):
@@ -199,6 +223,10 @@ class AtReplyPlugin(Star):
                 reasons.append("  - 你在当前群的特定@名单中")
             
             status.extend(reasons)
+            
+            # 添加关键词黑名单提示
+            if self._keyword_blacklist_set:
+                status.append("  - 但如果消息中含有特定关键词，仍不会被@")
         else:
             status = ["你的@状态：", "❌ 你不会被@回复"]
         
