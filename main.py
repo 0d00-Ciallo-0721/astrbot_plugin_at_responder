@@ -6,7 +6,8 @@ import os
 import json
 import asyncio
 import functools
-from typing import Set, Dict, Optional, Union, List, Any
+import re
+from typing import Set, Dict, Optional, Union, List, Any, Pattern
 from collections import defaultdict
 from functools import lru_cache
 
@@ -14,7 +15,7 @@ from functools import lru_cache
     "astrbot_plugin_at_responder",
     "和泉智宏",
     "针对特定用户的@回复功能，支持全局@、特定群@、全群@和黑名单设置",
-    "1.2",
+    "1.3",  
     "https://github.com/0d00-Ciallo-0721/astrbot_plugin_at_responder"
 )
 class AtReplyPlugin(Star):
@@ -30,6 +31,7 @@ class AtReplyPlugin(Star):
         self._specific_at_dict = None
         self._blacklist_dict = None
         self._keyword_blacklist_set = None
+        self._keyword_patterns = None  # 用于存储预编译的关键词正则表达式
         
         # 创建定时重载任务
         self._create_reload_task()
@@ -55,6 +57,16 @@ class AtReplyPlugin(Star):
         
         # 加载关键词黑名单
         self._keyword_blacklist_set = set(str(x).lower() for x in self.config.get("keyword_blacklist", []))
+        
+        # 预编译关键词正则表达式
+        self._keyword_patterns = []
+        for keyword in self._keyword_blacklist_set:
+            try:
+                # 转义特殊字符并编译正则
+                pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+                self._keyword_patterns.append(pattern)
+            except re.error:
+                logger.warning(f"无法编译关键词'{keyword}'为正则表达式")
         
         # 处理特定群@字典
         self._specific_at_dict = defaultdict(set)
@@ -99,6 +111,15 @@ class AtReplyPlugin(Star):
         logger.debug(f"配置加载完成 - 全局@: {len(self._global_at_set)}人, "
                     f"全群@: {len(self._all_at_groups_set)}群, "
                     f"关键词黑名单: {len(self._keyword_blacklist_set)}个")
+        
+        # 清理所有缓存
+        if hasattr(self._is_blacklisted, 'cache_clear'):
+            self._is_blacklisted.cache_clear()
+            logger.debug("已清理黑名单检查缓存")
+        
+        if hasattr(self._need_at, 'cache_clear'):
+            self._need_at.cache_clear()
+            logger.debug("已清理@需求检查缓存")
     
     def _save_config(self):
         """仅在配置有变更时保存"""
@@ -139,7 +160,7 @@ class AtReplyPlugin(Star):
         asyncio.create_task(reload_periodically())
     
     # 使用LRU缓存提高频繁检查的性能
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=256, typed=True)
     def _is_blacklisted(self, sender_id: str, group_id: Optional[str]) -> bool:
         """检查用户是否在黑名单中（使用缓存）"""
         self._ensure_configs_loaded()
@@ -148,19 +169,20 @@ class AtReplyPlugin(Star):
                 (group_id and sender_id in self._blacklist_dict[group_id]))
     
     def _has_blacklisted_keyword(self, message_text: str) -> bool:
-        """检查消息是否包含黑名单关键词"""
+        """使用预编译正则检查消息是否包含黑名单关键词"""
         self._ensure_configs_loaded()
-        if not self._keyword_blacklist_set or not message_text:
+        if not self._keyword_patterns or not message_text:
             return False
             
-        message_text = message_text.lower()
-        for keyword in self._keyword_blacklist_set:
-            if keyword in message_text:
+        # 使用预编译正则表达式提高性能
+        for pattern in self._keyword_patterns:
+            if pattern.search(message_text):
+                keyword = pattern.pattern[4:-2]  # 去除正则转义字符 '\\'
                 logger.debug(f"消息中包含黑名单关键词: {keyword}")
                 return True
         return False
     
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=256, typed=True)
     def _need_at(self, sender_id: str, group_id: Optional[str]) -> bool:
         """检查是否需要@该用户（使用缓存）"""
         self._ensure_configs_loaded()
@@ -183,19 +205,24 @@ class AtReplyPlugin(Star):
             
             # 用户黑名单检查
             if self._is_blacklisted(sender_id, group_id):
+                logger.debug(f"用户 {sender_id} 在黑名单中，不进行@")
                 return
             
             # 关键词黑名单检查
-            original_message = event.get_message()
-            if original_message and self._has_blacklisted_keyword(original_message):
+            message_text = event.get_message_str()  # 使用正确的方法获取消息文本
+            if message_text and self._has_blacklisted_keyword(message_text):
+                logger.debug(f"用户 {sender_id} 消息包含黑名单关键词，不进行@")
                 return
                 
             if self._need_at(sender_id, group_id):
+                logger.debug(f"用户 {sender_id} 需要被@")
                 # 添加At
                 result.chain.insert(0, At(qq=sender_id))
                 # 优化空格：使用条件表达式
                 if len(result.chain) > 1 and isinstance(result.chain[1], Plain):
                     result.chain[1].text = result.chain[1].text.lstrip()
+            else:
+                logger.debug(f"用户 {sender_id} 不需要被@")
         except Exception as e:
             logger.error(f"@处理错误: {e}")
 
@@ -231,6 +258,33 @@ class AtReplyPlugin(Star):
             status = ["你的@状态：", "❌ 你不会被@回复"]
         
         yield event.plain_result("\n".join(status))
+
+    @filter.command("at_cache_info")
+    async def at_cache_info(self, event: AstrMessageEvent):
+        """查看缓存状态信息"""
+        if not event.is_admin():
+            yield event.plain_result("⚠️ 权限不足，仅管理员可查看缓存信息")
+            return
+            
+        info = [
+            "缓存状态信息：",
+            f"黑名单检查缓存: {self._is_blacklisted.cache_info()}",
+            f"@需求检查缓存: {self._need_at.cache_info()}",
+            f"预编译关键词数量: {len(self._keyword_patterns)}个"
+        ]
+        
+        yield event.plain_result("\n".join(info))
+    
+    @filter.command("at_reload_config")
+    async def at_reload_config(self, event: AstrMessageEvent):
+        """重新加载配置"""
+        if not event.is_admin():
+            yield event.plain_result("⚠️ 权限不足，仅管理员可重载配置")
+            return
+            
+        self._configs_loaded = False
+        self._ensure_configs_loaded()
+        yield event.plain_result("✅ 配置已重新加载")
 
     async def terminate(self):
         """插件终止时保存配置"""
