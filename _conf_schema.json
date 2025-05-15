@@ -30,7 +30,7 @@
         "default": "{\"全局\":[]}"
     },
     "keyword_blacklist": {
-        "description": "关键词黑名单，消息中含有这些关键词时不会被@",
+        "description": "关键词黑名单，包含这些关键词的消息不会被@",
         "type": "list",
         "hint": "请输入关键词，一行一个",
         "items": {
