@@ -15,7 +15,7 @@ from functools import lru_cache
     "astrbot_plugin_at_responder",
     "和泉智宏",
     "针对特定用户的@回复功能，支持全局@、特定群@、全群@和黑名单设置",
-    "1.3",  
+    "1.4",  # 更新版本号
     "https://github.com/0d00-Ciallo-0721/astrbot_plugin_at_responder"
 )
 class AtReplyPlugin(Star):
