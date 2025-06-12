@@ -6,8 +6,7 @@ import os
 import json
 import asyncio
 import functools
-import re
-from typing import Set, Dict, Optional, Union, List, Any, Pattern
+from typing import Set, Dict, Optional, Union, List, Any
 from collections import defaultdict
 from functools import lru_cache
 
@@ -15,7 +14,7 @@ from functools import lru_cache
     "astrbot_plugin_at_responder",
     "和泉智宏",
     "针对特定用户的@回复功能，支持全局@、特定群@、全群@和黑名单设置",
-    "1.4",  # 更新版本号
+    "1.3",
     "https://github.com/0d00-Ciallo-0721/astrbot_plugin_at_responder"
 )
 class AtReplyPlugin(Star):
@@ -31,10 +30,9 @@ class AtReplyPlugin(Star):
         self._specific_at_dict = None
         self._blacklist_dict = None
         self._keyword_blacklist_set = None
-        self._keyword_patterns = None  # 用于存储预编译的关键词正则表达式
         
-        # 创建定时重载任务
-        self._create_reload_task()
+        # 初始加载配置
+        self._ensure_configs_loaded()
         
     def _ensure_configs_loaded(self):
         """确保配置已加载（懒加载）"""
@@ -43,7 +41,7 @@ class AtReplyPlugin(Star):
             self._configs_loaded = True
     
     def _load_configs(self):
-        """加载所有配置"""
+        """加载所有配置，使用原子性操作防止竞态条件"""
         # 清理无关配置项
         for old_key in ["target_groups", "target_users", "group_user_pairs", 
                        "at_blacklist", "enabled_groups"]:
@@ -51,75 +49,84 @@ class AtReplyPlugin(Star):
                 del self.config[old_key]
                 self._config_changed = True
         
-        # 使用defaultdict简化配置访问
-        self._global_at_set = set(str(x) for x in self.config.get("global_at_list", []))
-        self._all_at_groups_set = set(str(x) for x in self.config.get("all_at_groups", []))
-        
-        # 加载关键词黑名单
-        self._keyword_blacklist_set = set(str(x).lower() for x in self.config.get("keyword_blacklist", []))
-        
-        # 预编译关键词正则表达式
-        self._keyword_patterns = []
-        for keyword in self._keyword_blacklist_set:
-            try:
-                # 转义特殊字符并编译正则
-                pattern = re.compile(re.escape(keyword), re.IGNORECASE)
-                self._keyword_patterns.append(pattern)
-            except re.error:
-                logger.warning(f"无法编译关键词'{keyword}'为正则表达式")
-        
-        # 处理特定群@字典
-        self._specific_at_dict = defaultdict(set)
-        spec_data = self.config.get("specific_at_json", "{}")
-        if spec_data and spec_data.strip():
-            try:
-                if isinstance(spec_data, str):
-                    spec_data = json.loads(spec_data)
-                for group_id, users in spec_data.items():
-                    self._specific_at_dict[str(group_id)] = set(str(u) for u in users)
-            except json.JSONDecodeError:
-                logger.warning("specific_at_json 格式无效，将使用空配置")
-            except Exception as e:
-                logger.error(f"处理 specific_at_json 时发生错误: {e}")
-        
-        # 处理黑名单字典
-        self._blacklist_dict = defaultdict(set)
-        blacklist_data = self.config.get("blacklist_json", '{"全局":[]}')
-        if blacklist_data and blacklist_data.strip():
-            try:
-                if isinstance(blacklist_data, str):
-                    blacklist_data = json.loads(blacklist_data)
-                for group_id, users in blacklist_data.items():
-                    self._blacklist_dict[str(group_id)] = set(str(u) for u in users)
-            except json.JSONDecodeError:
-                logger.warning("blacklist_json 格式无效，将使用默认配置")
-            except Exception as e:
-                logger.error(f"处理 blacklist_json 时发生错误: {e}")
-        
-        # 验证配置中只有预期的键
-        valid_keys = {"global_at_list", "specific_at_json", "all_at_groups", "blacklist_json", "keyword_blacklist"}
-        for key in list(self.config.keys()):
-            if key not in valid_keys:
-                del self.config[key]
-                self._config_changed = True
-        
-        # 如果配置有变更，保存
-        if self._config_changed:
-            self._save_config()
-            self._config_changed = False
+        try:
+            # 先加载到临时变量，确保原子性
+            temp_global_at_set = set(str(x) for x in self.config.get("global_at_list", []))
+            temp_all_at_groups_set = set(str(x) for x in self.config.get("all_at_groups", []))
+            temp_keyword_blacklist_set = set(str(x).lower() for x in self.config.get("keyword_blacklist", []))
             
-        logger.debug(f"配置加载完成 - 全局@: {len(self._global_at_set)}人, "
-                    f"全群@: {len(self._all_at_groups_set)}群, "
-                    f"关键词黑名单: {len(self._keyword_blacklist_set)}个")
-        
-        # 清理所有缓存
-        if hasattr(self._is_blacklisted, 'cache_clear'):
-            self._is_blacklisted.cache_clear()
-            logger.debug("已清理黑名单检查缓存")
-        
-        if hasattr(self._need_at, 'cache_clear'):
-            self._need_at.cache_clear()
-            logger.debug("已清理@需求检查缓存")
+            # 处理特定群@字典
+            temp_specific_at_dict = defaultdict(set)
+            spec_data = self.config.get("specific_at_json", "{}")
+            if spec_data and spec_data.strip():
+                try:
+                    if isinstance(spec_data, str):
+                        spec_data = json.loads(spec_data)
+                    for group_id, users in spec_data.items():
+                        temp_specific_at_dict[str(group_id)] = set(str(u) for u in users)
+                except json.JSONDecodeError:
+                    logger.warning("specific_at_json 格式无效，将使用空配置")
+                    # 解析失败时使用空字典，但不影响其他配置的加载
+                    temp_specific_at_dict = defaultdict(set)
+            
+            # 处理黑名单字典
+            temp_blacklist_dict = defaultdict(set)
+            blacklist_data = self.config.get("blacklist_json", '{"全局":[]}')
+            if blacklist_data and blacklist_data.strip():
+                try:
+                    if isinstance(blacklist_data, str):
+                        blacklist_data = json.loads(blacklist_data)
+                    for group_id, users in blacklist_data.items():
+                        temp_blacklist_dict[str(group_id)] = set(str(u) for u in users)
+                except json.JSONDecodeError:
+                    logger.warning("blacklist_json 格式无效，将使用默认配置")
+                    # 解析失败时使用默认值，但不影响其他配置的加载
+                    temp_blacklist_dict = defaultdict(set)
+                    temp_blacklist_dict["全局"] = set()
+            
+            # 所有解析都完成后，原子性地更新实例变量
+            self._global_at_set = temp_global_at_set
+            self._all_at_groups_set = temp_all_at_groups_set
+            self._keyword_blacklist_set = temp_keyword_blacklist_set
+            self._specific_at_dict = temp_specific_at_dict
+            self._blacklist_dict = temp_blacklist_dict
+            
+            # 验证配置中只有预期的键
+            valid_keys = {"global_at_list", "specific_at_json", "all_at_groups", "blacklist_json", "keyword_blacklist"}
+            for key in list(self.config.keys()):
+                if key not in valid_keys:
+                    del self.config[key]
+                    self._config_changed = True
+            
+            # 如果配置有变更，保存
+            if self._config_changed:
+                self._save_config()
+                self._config_changed = False
+                
+            logger.debug(f"配置加载完成 - 全局@: {len(self._global_at_set)}人, "
+                        f"全群@: {len(self._all_at_groups_set)}群, "
+                        f"关键词黑名单: {len(self._keyword_blacklist_set)}个")
+            
+            # 清理所有缓存
+            if hasattr(self._is_blacklisted, 'cache_clear'):
+                self._is_blacklisted.cache_clear()
+                logger.debug("已清理黑名单检查缓存")
+            
+            if hasattr(self._need_at, 'cache_clear'):
+                self._need_at.cache_clear()
+                logger.debug("已清理@需求检查缓存")
+                
+            self._configs_loaded = True
+        except Exception as e:
+            logger.error(f"加载配置时发生错误: {e}")
+            # 如果是首次加载且失败，初始化为空集合
+            if self._global_at_set is None:
+                self._global_at_set = set()
+                self._all_at_groups_set = set()
+                self._keyword_blacklist_set = set()
+                self._specific_at_dict = defaultdict(set)
+                self._blacklist_dict = defaultdict(set)
+                self._blacklist_dict["全局"] = set()
     
     def _save_config(self):
         """仅在配置有变更时保存"""
@@ -138,26 +145,9 @@ class AtReplyPlugin(Star):
             
             self.config.save_config()
             self._config_changed = False
+            logger.info("配置已保存")
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
-    
-    def _create_reload_task(self):
-        """创建轻量级定时重载任务"""
-        async def reload_periodically():
-            while True:
-                try:
-                    await asyncio.sleep(300)  # 每5分钟
-                    # 只有配置变更时才重载
-                    if self._config_changed:
-                        logger.info("配置有变更，执行保存...")
-                        self._save_config()
-                    # 无论如何都重新加载，确保插件正常运行
-                    self._configs_loaded = False
-                    self._ensure_configs_loaded()
-                except Exception as e:
-                    logger.error(f"定时任务出错: {e}")
-        
-        asyncio.create_task(reload_periodically())
     
     # 使用LRU缓存提高频繁检查的性能
     @lru_cache(maxsize=256, typed=True)
@@ -169,15 +159,14 @@ class AtReplyPlugin(Star):
                 (group_id and sender_id in self._blacklist_dict[group_id]))
     
     def _has_blacklisted_keyword(self, message_text: str) -> bool:
-        """使用预编译正则检查消息是否包含黑名单关键词"""
+        """检查消息是否包含黑名单关键词"""
         self._ensure_configs_loaded()
-        if not self._keyword_patterns or not message_text:
+        if not self._keyword_blacklist_set or not message_text:
             return False
             
-        # 使用预编译正则表达式提高性能
-        for pattern in self._keyword_patterns:
-            if pattern.search(message_text):
-                keyword = pattern.pattern[4:-2]  # 去除正则转义字符 '\\'
+        message_text = message_text.lower()
+        for keyword in self._keyword_blacklist_set:
+            if keyword in message_text:
                 logger.debug(f"消息中包含黑名单关键词: {keyword}")
                 return True
         return False
@@ -209,7 +198,7 @@ class AtReplyPlugin(Star):
                 return
             
             # 关键词黑名单检查
-            message_text = event.get_message_str()  # 使用正确的方法获取消息文本
+            message_text = event.message_str  # 使用message_str属性获取纯文本
             if message_text and self._has_blacklisted_keyword(message_text):
                 logger.debug(f"用户 {sender_id} 消息包含黑名单关键词，不进行@")
                 return
@@ -259,6 +248,17 @@ class AtReplyPlugin(Star):
         
         yield event.plain_result("\n".join(status))
 
+    @filter.command("at_reload_config")
+    async def at_reload_config(self, event: AstrMessageEvent):
+        """重新加载配置"""
+        if not event.is_admin():
+            yield event.plain_result("⚠️ 权限不足，仅管理员可重载配置")
+            return
+            
+        self._configs_loaded = False
+        self._ensure_configs_loaded()
+        yield event.plain_result("✅ 配置已重新加载")
+        
     @filter.command("at_cache_info")
     async def at_cache_info(self, event: AstrMessageEvent):
         """查看缓存状态信息"""
@@ -270,21 +270,10 @@ class AtReplyPlugin(Star):
             "缓存状态信息：",
             f"黑名单检查缓存: {self._is_blacklisted.cache_info()}",
             f"@需求检查缓存: {self._need_at.cache_info()}",
-            f"预编译关键词数量: {len(self._keyword_patterns)}个"
+            f"关键词黑名单数量: {len(self._keyword_blacklist_set)}个"
         ]
         
         yield event.plain_result("\n".join(info))
-    
-    @filter.command("at_reload_config")
-    async def at_reload_config(self, event: AstrMessageEvent):
-        """重新加载配置"""
-        if not event.is_admin():
-            yield event.plain_result("⚠️ 权限不足，仅管理员可重载配置")
-            return
-            
-        self._configs_loaded = False
-        self._ensure_configs_loaded()
-        yield event.plain_result("✅ 配置已重新加载")
 
     async def terminate(self):
         """插件终止时保存配置"""
